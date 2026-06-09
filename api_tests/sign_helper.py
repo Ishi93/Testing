@@ -37,30 +37,34 @@ APP_KEY_DEX    = "51489327123659886251412561106451"
 GOOGLE_API_KEY = "AIzaSyDRKQ9d6kfsoZT2lUnZcZnBYvH69HExNPE"
 
 # ── Server config (from live app /loginbsnat config endpoint) ─────────────────
-#   Primary:     https://login.popoh5.com:510/loginbsnat
-#   Alternative: https://en.sjmobilegame.com:10410/loginbsnat  (EU-accessible)
-#   Pay primary: https://pay.popoh5.com:520/
+#   Primary:     https://login.popoh5.com:510/loginbsnat   → IP 47.89.242.44
+#   Alternative: https://en.sjmobilegame.com:10410/loginbsnat
+#   Pay primary: https://pay.popoh5.com:520/               → IP 47.89.242.44
 #   Pay alt:     https://en.sjmobilegame.com:10420/
+#
+# NOTE: Hostname DNS times out from some networks (Spain confirmed).
+#       Use IP-direct with SNI adapter — port 510/520 confirmed open on 47.89.242.44
 SERVER_LOGIN      = "https://login.popoh5.com:510"
 SERVER_LOGIN_ALT  = "https://en.sjmobilegame.com:10410"
+SERVER_LOGIN_IP   = "https://47.89.242.44:510"     # IP-direct, SNI=login.popoh5.com
 SERVER_PAY        = "https://pay.popoh5.com:520"
 SERVER_PAY_ALT    = "https://en.sjmobilegame.com:10420"
+SERVER_PAY_IP     = "https://47.89.242.44:520"     # IP-direct, SNI=pay.popoh5.com
 BASE_PATH         = "/loginbsnat"   # prefix for all SDK API endpoints
 
 SERVERS = {
     "login":         SERVER_LOGIN,
     "login_alt":     SERVER_LOGIN_ALT,
+    "login_ip":      SERVER_LOGIN_IP,
     "pay":           SERVER_PAY,
     "pay_alt":       SERVER_PAY_ALT,
-    # Static analysis servers
+    "pay_ip":        SERVER_PAY_IP,
     "account_primary": "http://account.pockerday.net",
-    "ip_510":        "https://47.89.242.44:510",
-    "ip_520":        "https://47.89.242.44:520",
     "cdn_h5":        "https://dragonh5cdn.popoh5.com",
     "sdk_happytomato": "http://sdkapi.happytomato.com.tw",
 }
 
-# SNI map for IP-direct connections
+# SNI map: when connecting to IP directly, send correct SNI hostname for TLS
 _SNI_MAP = {
     "https://47.89.242.44:510": "login.popoh5.com",
     "https://47.89.242.44:520": "pay.popoh5.com",
@@ -175,7 +179,7 @@ class QuickGameSession:
     authToken: str = LIVE_AUTH_TOKEN
     channel:   str = "default"
     lang:      str = "es"
-    server:    str = SERVER_LOGIN_ALT  # try EU-accessible server first
+    server:    str = SERVER_LOGIN_IP   # IP-direct (47.89.242.44:510) — hostname DNS blocked
     base_path: str = BASE_PATH
     sign_key:  str = SIGN_KEY_SDK
 
@@ -278,19 +282,30 @@ if __name__ == "__main__":
         print(f"    {k} = {str(v)[:60]}")
     print(f"    sign = {params['sign']}")
 
-    print(f"\n[*] Testing /v1/auth/getUserInfo on both servers...")
-    for srv_name, srv in [("ALT (en.sjmobilegame)", SERVER_LOGIN_ALT),
-                           ("PRIMARY (login.popoh5.com)", SERVER_LOGIN)]:
+    print(f"\n[*] Testing /v1/auth/getUserInfo — IP-direct first, then hostnames...")
+    for srv_name, srv in [
+        ("IP-direct 47.89.242.44:510", SERVER_LOGIN_IP),
+        ("ALT en.sjmobilegame:10410",  SERVER_LOGIN_ALT),
+        ("PRIMARY login.popoh5.com",   SERVER_LOGIN),
+    ]:
         print(f"\n  → {srv_name}:")
         try:
             r = SESSION.get("/v1/auth/getUserInfo", server=srv)
-            print(f"    [{r.status_code}] {r.text[:200]}")
+            print(f"    [{r.status_code}] {r.text[:300]}")
         except Exception as e:
-            print(f"    ERROR: {e}")
+            short = str(e)
+            if "timed out" in short or "ConnectTimeout" in short:
+                print(f"    [TIMEOUT] {srv}")
+            else:
+                print(f"    ERROR: {short[:120]}")
 
-    print(f"\n[*] Testing full-device /v1/system/init on ALT server...")
+    print(f"\n[*] Testing full-device /v1/system/init on IP-direct...")
     try:
-        r = SESSION.post("/v1/system/init", server=SERVER_LOGIN_ALT, full_device=True)
+        r = SESSION.post("/v1/system/init", server=SERVER_LOGIN_IP, full_device=True)
         print(f"    [{r.status_code}] {r.text[:300]}")
     except Exception as e:
-        print(f"    ERROR: {e}")
+        short = str(e)
+        if "timed out" in short or "ConnectTimeout" in short:
+            print(f"    [TIMEOUT]")
+        else:
+            print(f"    ERROR: {short[:120]}")

