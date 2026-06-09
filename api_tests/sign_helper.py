@@ -61,11 +61,11 @@ SERVERS = {
 
 PAY_CALLBACK_URL = "https://pay.popoh5.com:520/paycheckbsandroid"
 
-# Use IP direct — SNI adapter will send correct hostname in TLS handshake
-SERVER_LOGIN = "https://47.89.242.44:510"
-SERVER_PAY   = "https://47.89.242.44:520"
+# Use hostname directly — DNS resolves correctly, SNI is set automatically
+SERVER_LOGIN = "https://login.popoh5.com:510"
+SERVER_PAY   = "https://pay.popoh5.com:520"
 
-# Map: IP base URL → real SNI hostname nginx expects
+# SNI map kept for fallback if hostname stops resolving
 _SNI_MAP = {
     "https://47.89.242.44:510": "login.popoh5.com",
     "https://47.89.242.44:520": "pay.popoh5.com",
@@ -172,14 +172,14 @@ class QuickGameSession:
         base = server or self.server
         sign_key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
         body = self.base_params(extra=data, sign_key=sign_key)
-        return self._session.post(base + endpoint, data=body, timeout=15)
+        return self._session.post(base + endpoint, data=body, timeout=30)
 
     def get(self, endpoint: str, extra_params: dict = None, server: str = None,
             pay_sign: bool = False) -> requests.Response:
         base = server or self.server
         sign_key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
         params = self.base_params(extra=extra_params, sign_key=sign_key)
-        return self._session.get(base + endpoint, params=params, timeout=15)
+        return self._session.get(base + endpoint, params=params, timeout=30)
 
 
 # Default session with live-captured credentials
