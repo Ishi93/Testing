@@ -1,185 +1,163 @@
 """
-QuickGame SDK — Request Signing Helper
+QuickGame SDK — Request Signing Helper (CORRECTED from live Frida capture)
 Dragon Ball Adventure Idle (com.h5bi.winr v1.0.1)
 
-Implements the MD5-based HMAC used by the QuickGame Android SDK.
-Format extracted from DEX: uid=%s&username=%s&token=%s&os=%s&usermode=%d
-Sign data prefix: signData before MD5 is: <data>+<appKey>
+LIVE SIGNING FORMAT (confirmed from Frida 2025-06-09):
+  - Sort all request params alphabetically by key
+  - Concatenate as "k1=v1&k2=v2&...&kN=vN"
+  - Append signing key with separator: + "&" + SIGN_KEY
+  - sign = MD5(result)
 
-Usage:
-    from sign_helper import QuickGameSigner, QuickGameSession
+Signing keys (3 discovered, NOT the hardcoded appKey from DEX):
+  SIGN_KEY_SDK     = "0b2a18e45d7df321"  -> auth/user/game endpoints
+  SIGN_KEY_PAYMENT = "8e45320d7dfb2a11"  -> /v1/payment/ and /v1/auth/createOrder
+  SIGN_KEY_AD      = "753a823vgd7dhfx1"  -> ad SDK calls
+
+NOTE: Field is "authToken" (not "token") — confirmed from live traffic.
 """
 
 import hashlib
 import time
-import urllib.parse
 import requests
+import urllib3
 from dataclasses import dataclass, field
 from typing import Optional
 
+urllib3.disable_warnings()
 
-# ── Hardcoded credentials found in DEX ──────────────────────────────────────
 
-APP_KEY = "51489327123659886251412561106451"   # from MainActivity.startSDKLogin()
-GOOGLE_API_KEY = "AIzaSyDRKQ9d6kfsoZT2lUnZcZnBYvH69HExNPE"  # exposed in APK
+# ── Signing keys (from Frida live capture) ────────────────────────────────────
+SIGN_KEY_SDK     = "0b2a18e45d7df321"   # auth, user, game endpoints
+SIGN_KEY_PAYMENT = "8e45320d7dfb2a11"   # payment + createOrder
+SIGN_KEY_AD      = "753a823vgd7dhfx1"   # ad SDK
 
-# Primary servers (confirmed from DEX strings)
+# Kept for reference — hardcoded in DEX but NOT the actual signing key
+APP_KEY_DEX      = "51489327123659886251412561106451"
+GOOGLE_API_KEY   = "AIzaSyDRKQ9d6kfsoZT2lUnZcZnBYvH69HExNPE"
+
+# ── Servers (confirmed from Frida live traffic) ───────────────────────────────
 SERVERS = {
+    # Primary servers from live capture
+    "login":            "https://login.popoh5.com:510",
+    "pay":              "https://pay.popoh5.com:520",
+
+    # Servers from DEX static analysis
     "account_primary":  "http://account.pockerday.net",
     "account_alt":      "https://aiwzfu.topgame.tw",
     "serverlist_1":     "http://103.14.33.146:89/api/serverlist",
     "serverlist_2":     "https://aiwzfu.topgame.tw/api/serverlist",
-    "sdk_primary":      "http://sdkapi.happytomato.com.tw",
-    "sdk_qsdk":         "http://qsdk.t4game.com",
-    "sdk_tkd":          "http://tkd-qsdk.gigagames.co.th",
+    "sdk_happytomato":  "http://sdkapi.happytomato.com.tw",
+    "sdk_t4game":       "http://qsdk.t4game.com",
+    "sdk_gigagames":    "http://tkd-qsdk.gigagames.co.th",
     "cdn_h5":           "https://dragonh5cdn.popoh5.com",
-    "xdrig_config":     "https://cloud.xdrig.com",
-    "xdrig_push":       "https://push.xdrig.com",
 }
 
-# Full endpoint list from DEX
-ENDPOINTS = [
-    "/v1/system/init",
-    "/v1/system/getNotice",
-    "/v1/system/getAgreement",
-    "/v1/user/login",
-    "/v1/user/loginByName",
-    "/v1/user/register",
-    "/v1/user/registerUser",
-    "/v1/user/registerVisitor",
-    "/v1/user/autoLogin",
-    "/v1/user/ckRegVistor",
-    "/v1/user/actCdKey",                 # CDKey activation — HIGH VALUE
-    "/v1/user/findPassByEmail",
-    "/v1/user/sendCodeByEmail",
-    "/v1/user/getServerAgreement",
-    "/v1/user/postGooglePlayVerify",     # Google Play receipt verification — CRITICAL
-    "/v1/user/postOnestoreVerify",
-    "/v1/user/userLoginByOtherSdk",
-    "/v1/user/updateGameRoleInfo",
-    "/v1/auth/getUserInfo",
-    "/v1/auth/changePassword",
-    "/v1/auth/createOrder",              # Order creation — HIGH VALUE
-    "/v1/auth/setGameRoleInfo",
-    "/v1/auth/bindMail",
-    "/v1/auth/unBindOtherInfo",
-    "/v1/auth/userBindOtherSdk",
-    "/v1/auth/viewMigCode",
-    "/v1/auth/jianchaLayLx",
-    "/v1/auth/cUserTrash",               # Account deletion
-    "/v1/auth/fbActInit",
-    "/v1/auth/fbInviteEvent",
-    "/v1/auth/fbLikeEvent",
-    "/v1/auth/fbShareEvent",
-    "/v1/auth/fbUserClaimEvent",
-    "/v1/payment/paySuccess",            # Payment success callback — CRITICAL
-    "/v1/api/init",
-    "/payH5/payCenter",
-    "/payH5/fbActive",
-    "/api/q/a/%s",
-]
+# Payment callback URL (from QGOrderInfo.callbackURL captured in Frida)
+PAY_CALLBACK_URL = "https://pay.popoh5.com:520/paycheckbsandroid"
 
 
 def md5(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
-def build_sign(uid: str, username: str, token: str, os_type: str, usermode: int,
-               app_key: str = APP_KEY) -> str:
+def build_sign(params: dict, sign_key: str = SIGN_KEY_SDK) -> str:
     """
-    Reconstruct the QuickGame SDK request signature.
-    Format from DEX: uid=%s&username=%s&token=%s&os=%s&usermode=%d + appKey
-    Log string found: 'signData before MD5 is:'
+    Correct QuickGame signing algorithm from live Frida capture.
+    Sort params by key, build k=v&... string, append &<sign_key>, MD5.
     """
-    data = f"uid={uid}&username={username}&token={token}&os={os_type}&usermode={usermode}{app_key}"
-    return md5(data)
+    sorted_pairs = sorted(params.items(), key=lambda x: x[0])
+    sign_str = "&".join(f"{k}={v}" for k, v in sorted_pairs)
+    sign_str += "&" + sign_key
+    return md5(sign_str)
+
+
+# ── CAPTURED LIVE SESSION (Frida 2025-06-09, BlueStacks) ─────────────────────
+# uid:       28300872
+# username:  ec32676691
+# authToken: 770b797ad930a2b3e668e2131294ac2e
+# isGuest:   1
+# isNewUser: 1
+# Captured payment order: cpOrderNo=6c5a894fe7a4481cff0c2f554242f3e6
+#   goodsId: com.h5bi.winr.05 (PermanentPassx1)
+#   callbackUrl: https://pay.popoh5.com:520/paycheckbsandroid
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class QuickGameSession:
-    """Represents a captured QuickGame SDK session (fill from Frida/Burp output)."""
-    uid:      str = ""
-    username: str = ""
-    token:    str = ""
-    os_type:  str = "android"
-    usermode: int = 0
-    server:   str = SERVERS["account_primary"]
-    app_key:  str = APP_KEY
+    """Represents a captured QuickGame SDK session."""
+    uid:        str = "28300872"
+    username:   str = "ec32676691"
+    authToken:  str = "770b797ad930a2b3e668e2131294ac2e"
+    channel:    str = "default"
+    lang:       str = "es"
+    os_type:    str = "android"
+    usermode:   int = 0
+    server:     str = SERVERS["login"]
+    sign_key:   str = SIGN_KEY_SDK
 
-    # HTTP session with proper headers (spoof the app)
     _session: requests.Session = field(default_factory=requests.Session, repr=False)
 
     def __post_init__(self):
         self._session.headers.update({
-            "User-Agent":   "Dalvik/2.1.0 (Linux; U; Android 9; SM-G960F Build/PPR1.180610.011)",
+            "User-Agent":   "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E Build/RP1A.200720.012)",
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept":       "application/json",
         })
-        # Allow cleartext (the app does this)
-        self._session.verify = False  # also disable for HTTPS MITM via Burp
+        self._session.verify = False
 
-    @property
-    def sign(self) -> str:
-        return build_sign(self.uid, self.username, self.token,
-                          self.os_type, self.usermode, self.app_key)
-
-    def base_params(self) -> dict:
-        """Standard authenticated parameters for most endpoints."""
-        return {
-            "uid":      self.uid,
-            "username": self.username,
-            "token":    self.token,
-            "os":       self.os_type,
-            "usermode": self.usermode,
-            "sign":     self.sign,
-            "appKey":   self.app_key,
+    def base_params(self, extra: dict = None, sign_key: str = None) -> dict:
+        """Build signed param dict for a request."""
+        ts = str(int(time.time()))
+        params = {
+            "uid":         self.uid,
+            "username":    self.username,
+            "authToken":   self.authToken,
+            "channelCode": self.channel,
+            "clientLang":  self.lang,
+            "os":          self.os_type,
+            "usermode":    str(self.usermode),
+            "time":        ts,
         }
+        if extra:
+            params.update(extra)
+        key = sign_key or self.sign_key
+        params["sign"] = build_sign(params, key)
+        return params
 
-    def get(self, endpoint: str, extra_params: dict = None, server: str = None) -> requests.Response:
+    def base_params_payment(self, extra: dict = None) -> dict:
+        """Signed params for payment endpoints (uses SIGN_KEY_PAYMENT)."""
+        return self.base_params(extra=extra, sign_key=SIGN_KEY_PAYMENT)
+
+    def post(self, endpoint: str, data: dict = None, server: str = None,
+             pay_sign: bool = False) -> requests.Response:
         base = server or self.server
-        params = self.base_params()
-        if extra_params:
-            params.update(extra_params)
+        sign_key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
+        body = self.base_params(extra=data, sign_key=sign_key)
         url = base + endpoint
-        resp = self._session.get(url, params=params, timeout=15)
-        return resp
+        return self._session.post(url, data=body, timeout=15)
 
-    def post(self, endpoint: str, data: dict = None, server: str = None) -> requests.Response:
+    def get(self, endpoint: str, extra_params: dict = None, server: str = None,
+            pay_sign: bool = False) -> requests.Response:
         base = server or self.server
-        body = self.base_params()
-        if data:
-            body.update(data)
+        sign_key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
+        params = self.base_params(extra=extra_params, sign_key=sign_key)
         url = base + endpoint
-        resp = self._session.post(url, data=body, timeout=15)
-        return resp
+        return self._session.get(url, params=params, timeout=15)
 
 
-def test_serverlist(host_to_query: str = "dragonh5cdn.popoh5.com") -> None:
-    """Probe the serverlist endpoint to identify active game servers."""
-    import urllib3
-    urllib3.disable_warnings()
-
-    for name, url in SERVERS.items():
-        if "serverlist" in url or "account" in url or "sdk" in url:
-            full = f"{url}?host={host_to_query}" if "?" not in url else url + f"&host={host_to_query}"
-            try:
-                r = requests.get(full, timeout=8, verify=False,
-                                  headers={"User-Agent": "Dalvik/2.1.0"})
-                print(f"[{r.status_code}] {name}: {full}")
-                if r.status_code == 200:
-                    print(f"  Response: {r.text[:300]}")
-            except Exception as e:
-                print(f"[ERR] {name}: {e}")
+# Default session with live-captured credentials
+SESSION = QuickGameSession()
 
 
 if __name__ == "__main__":
-    print("[*] Testing serverlist endpoints...")
-    test_serverlist()
-
-    # Example: build a signed request manually
-    print("\n[*] Example signed request:")
-    sess = QuickGameSession(
-        uid="12345", username="testuser", token="FILL_FROM_FRIDA", os_type="android"
-    )
-    print(f"  Sign: {sess.sign}")
-    print(f"  Base params: {sess.base_params()}")
+    print("[*] sign_helper.py — QuickGame SDK signing test")
+    print(f"    uid:       {SESSION.uid}")
+    print(f"    username:  {SESSION.username}")
+    print(f"    authToken: {SESSION.authToken}")
+    print(f"    server:    {SESSION.server}")
+    params = SESSION.base_params()
+    print(f"\n[*] Example signed params:")
+    for k, v in params.items():
+        print(f"    {k} = {v}")
+    print(f"\n[*] Sign = {params['sign']}")

@@ -20,17 +20,9 @@ import random
 import json
 import urllib3
 import requests
-from sign_helper import QuickGameSession, SERVERS, APP_KEY
+from sign_helper import SESSION as CAPTURED_SESSION, SERVERS
 
 urllib3.disable_warnings()
-
-# Fill from Frida/Burp after logging in
-CAPTURED_SESSION = QuickGameSession(
-    uid="FILL_UID",
-    username="FILL_USER",
-    token="FILL_TOKEN",
-    server=SERVERS["account_primary"],
-)
 
 RATE_LIMIT_DELAY = 2.0  # seconds between requests
 
@@ -214,11 +206,8 @@ def test_cdkey_with_uid_swap(session: QuickGameSession, valid_cdkey: str):
 
 
 if __name__ == "__main__":
-    if CAPTURED_SESSION.uid == "FILL_UID":
-        print("[!] WARNING: Session not filled. Using unauthenticated mode.")
-        print("    Run Frida 02_hook_signing.js first.\n")
-
     print("[*] CDKey Analysis — com.h5bi.winr v1.0.1")
+    print(f"    uid: {CAPTURED_SESSION.uid} | server: {CAPTURED_SESSION.server}\n")
 
     error_map = analyze_error_messages(CAPTURED_SESSION)
     detect_rate_limiting(CAPTURED_SESSION)
