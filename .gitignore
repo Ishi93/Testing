@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 apk_extracted/
+# Emulator images — too large for git
+*.iso
+*.qcow2
+*.img
