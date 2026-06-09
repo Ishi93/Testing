@@ -70,6 +70,13 @@ _SNI_MAP = {
     "https://47.89.242.44:520": "pay.popoh5.com",
 }
 
+# Host header override: nginx vhost routing requires correct Host even when connecting by IP
+# Without this, requests sends "Host: 47.89.242.44:510" → nginx returns "没有开通"
+_HOST_MAP = {
+    "https://47.89.242.44:510": "login.popoh5.com",
+    "https://47.89.242.44:520": "pay.popoh5.com",
+}
+
 
 def md5(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()
@@ -249,19 +256,31 @@ class QuickGameSession:
         params["appKey"] = APP_KEY_DEX
         return params
 
+    @staticmethod
+    def _host_headers(server: str) -> dict:
+        """Inject correct Host header for IP-direct connections (nginx vhost routing)."""
+        for prefix, host in _HOST_MAP.items():
+            if server and server.startswith(prefix):
+                return {"Host": host}
+        return {}
+
     def post(self, endpoint: str, data: dict = None, server: str = None,
              pay_sign: bool = False, full_device: bool = False) -> requests.Response:
-        base = (server or self.server) + self.base_path
+        srv = server or self.server
+        base = srv + self.base_path
         key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
         body = self.base_params(extra=data, sign_key=key, full_device=full_device)
-        return self._session.post(base + endpoint, data=body, timeout=30)
+        return self._session.post(base + endpoint, data=body, timeout=30,
+                                  headers=self._host_headers(srv))
 
     def get(self, endpoint: str, extra_params: dict = None, server: str = None,
             pay_sign: bool = False) -> requests.Response:
-        base = (server or self.server) + self.base_path
+        srv = server or self.server
+        base = srv + self.base_path
         key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
         params = self.base_params(extra=extra_params, sign_key=key)
-        return self._session.get(base + endpoint, params=params, timeout=30)
+        return self._session.get(base + endpoint, params=params, timeout=30,
+                                 headers=self._host_headers(srv))
 
 
 # Default session
