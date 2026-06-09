@@ -258,3 +258,50 @@ Additional keys/IDs found in DEX:
    - Frida script 03 injects XHR proxy
    - Capture game logic API calls from H5 layer
    - Look for game-state manipulation endpoints
+
+---
+
+## Infrastructure Analysis (Dynamic)
+
+### Network Infrastructure Discovery
+
+| Domain | IP | Cloud Provider | Notes |
+|--------|-----|----------------|-------|
+| account.pockerday.net | 35.236.46.217 | GCP us-central1 | Primary API server |
+| test.pockerday.net | **47.254.31.115** | Alibaba Cloud | TEST environment — different IP! |
+| aiwzfu.topgame.tw | 128.14.226.39 | US datacenter | Alt API server |
+| dragonh5cdn.popoh5.com | 43.152.135.174 etc | Tencent Cloud | Game H5 CDN |
+| login.popoh5.com | 47.89.242.44 | Alibaba Cloud HK | Login/pay endpoint |
+| pay.popoh5.com | 47.89.242.44 | Alibaba Cloud HK | Payment endpoint |
+| sdkapi.happytomato.com.tw | 18.182.242.68 | AWS Tokyo | QuickGame SDK (Taiwan) |
+| account.quickgame.com | 13.205.213.237 etc | AWS ap-south-1 | Parent SDK company |
+
+### WAF Finding
+**NOT a game WAF** — this cloud environment (Claude Code on web) routes all HTTP/S through Anthropic's egress proxy which enforces an allowlist. Confirmed by TLS certificate:
+```
+Issuer: O = Anthropic, CN = Egress Gateway SDS Issuing CA (production)
+```
+All endpoints return `x-deny-reason: host_not_allowed` because these game server domains are not permitted outbound destinations from this environment.
+
+**Impact on testing:** All active API tests require a non-restricted environment (local machine, VPS, physical Android device).
+
+### APK Signing Certificate
+- APKPure repack — signed with fake "Google Inc." self-signed cert (NOT Google Play)
+- Key: RSA 4096-bit
+- Validity: 2019–2049
+- Serial: `5472d99351533...`
+- **Risk:** This APK can be modified and resigned with the same fake cert — no integrity protection
+
+### Complete Credential Inventory
+
+| Item | Value | Risk |
+|------|-------|------|
+| QuickGame appKey | `51489327123659886251412561106451` | CRITICAL |
+| Alternate key | `B3EEABB8EE11C2BE770B684D95219ECB` | HIGH |
+| Google API Key | `AIzaSyDRKQ9d6kfsoZT2lUnZcZnBYvH69HExNPE` | HIGH |
+| Facebook App ID | `903491750023090` | MEDIUM |
+| TalkingData AppID | `DOVC` | LOW |
+| TalkingData AppKey | `0838cc5b097f4fa830d1c3715727bfab` | LOW |
+| MD5 signing format | `uid=X&username=Y&token=Z&os=A&usermode=N{appKey}` | CRITICAL |
+| JS Bridge name | `window.android` | CRITICAL |
+| JS Payment method | `window.android.onPaySuccess(...)` | CRITICAL |
