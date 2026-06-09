@@ -24,7 +24,7 @@ import time
 import uuid
 import urllib3
 import requests
-from sign_helper import QuickGameSession, SESSION, SERVERS, SIGN_KEY_PAYMENT, md5
+from sign_helper import QuickGameSession, SESSION, SERVERS, SIGN_KEY_PAYMENT, md5, SERVER_LOGIN, SERVER_PAY
 
 urllib3.disable_warnings()
 
@@ -35,17 +35,9 @@ urllib3.disable_warnings()
 CAPTURED_SESSION = SESSION
 CAPTURED_ORDER_ID = "6c5a894fe7a4481cff0c2f554242f3e6"
 
-# Payment endpoint is on pay.popoh5.com:520, NOT login server
-PAY_SERVER  = SERVERS["pay"]    # https://pay.popoh5.com:520
-AUTH_SERVER = SERVERS["login"]  # https://login.popoh5.com:510
-
-# All known servers to probe — try each if primary times out
-ALL_SERVERS = [
-    ("pay",             SERVERS["pay"]),
-    ("login",           SERVERS["login"]),
-    ("account_primary", SERVERS["account_primary"]),
-    ("account_alt",     SERVERS["account_alt"]),
-]
+# Use IP direct with Host header (DNS blocked, IP is reachable)
+PAY_SERVER  = SERVER_PAY    # https://47.89.242.44:520 + Host: pay.popoh5.com
+AUTH_SERVER = SERVER_LOGIN  # https://47.89.242.44:510 + Host: login.popoh5.com
 
 
 def log(label: str, resp: requests.Response):

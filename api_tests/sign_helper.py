@@ -93,6 +93,19 @@ def build_sign(params: dict, sign_key: str = SIGN_KEY_SDK) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# IP-to-hostname mapping for Host header override
+# DNS doesn't resolve from some locations, but IP is reachable
+IP_HOST_MAP = {
+    "https://47.89.242.44:510": "login.popoh5.com",
+    "https://47.89.242.44:520": "pay.popoh5.com",
+    "http://47.89.242.44":      "login.popoh5.com",
+}
+
+# Best servers to use (IP direct with Host header)
+SERVER_LOGIN = "https://47.89.242.44:510"
+SERVER_PAY   = "https://47.89.242.44:520"
+
+
 @dataclass
 class QuickGameSession:
     """Represents a captured QuickGame SDK session."""
@@ -103,7 +116,7 @@ class QuickGameSession:
     lang:       str = "es"
     os_type:    str = "android"
     usermode:   int = 0
-    server:     str = SERVERS["login"]
+    server:     str = SERVER_LOGIN
     sign_key:   str = SIGN_KEY_SDK
 
     _session: requests.Session = field(default_factory=requests.Session, repr=False)
@@ -116,6 +129,11 @@ class QuickGameSession:
         })
         self._session.verify = False
         self._session.max_redirects = 3
+
+    def _host_header(self, base_url: str) -> dict:
+        """Return Host header override if connecting by IP."""
+        hostname = IP_HOST_MAP.get(base_url.rstrip("/"))
+        return {"Host": hostname} if hostname else {}
 
     def base_params(self, extra: dict = None, sign_key: str = None) -> dict:
         """Build signed param dict for a request."""
@@ -146,7 +164,9 @@ class QuickGameSession:
         sign_key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
         body = self.base_params(extra=data, sign_key=sign_key)
         url = base + endpoint
-        return self._session.post(url, data=body, timeout=15)
+        extra_headers = self._host_header(base)
+        return self._session.post(url, data=body, timeout=15,
+                                  headers=extra_headers if extra_headers else None)
 
     def get(self, endpoint: str, extra_params: dict = None, server: str = None,
             pay_sign: bool = False) -> requests.Response:
@@ -154,7 +174,9 @@ class QuickGameSession:
         sign_key = SIGN_KEY_PAYMENT if pay_sign else self.sign_key
         params = self.base_params(extra=extra_params, sign_key=sign_key)
         url = base + endpoint
-        return self._session.get(url, params=params, timeout=15)
+        extra_headers = self._host_header(base)
+        return self._session.get(url, params=params, timeout=15,
+                                 headers=extra_headers if extra_headers else None)
 
 
 # Default session with live-captured credentials

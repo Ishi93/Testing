@@ -85,12 +85,21 @@ def http_probe(name: str, base: str):
         return None
 
 
+IP_HOST_HEADERS = {
+    "https://47.89.242.44:510": "login.popoh5.com",
+    "https://47.89.242.44:520": "pay.popoh5.com",
+    "http://47.89.242.44":      "login.popoh5.com",
+}
+
 def probe_endpoint(name: str, base: str, endpoint: str):
-    """Probe a specific API endpoint."""
+    """Probe a specific API endpoint with Host header override if IP-based."""
+    host_hdr = IP_HOST_HEADERS.get(base.rstrip("/"), "")
+    hdrs = {"User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM S908E)"}
+    if host_hdr:
+        hdrs["Host"] = host_hdr
     try:
         r = requests.post(base + endpoint, timeout=TIMEOUT, verify=False,
-                          headers={"User-Agent": "Dalvik/2.1.0"},
-                          data={"probe": "1"})
+                          headers=hdrs, data={"probe": "1"})
         print(f"  [HTTP {r.status_code}] {name:<20} {endpoint} => {r.text[:100]}")
         return r.status_code
     except requests.exceptions.ConnectTimeout:
