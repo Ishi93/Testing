@@ -37,18 +37,28 @@ GOOGLE_API_KEY   = "AIzaSyDRKQ9d6kfsoZT2lUnZcZnBYvH69HExNPE"
 
 # ── Servers (confirmed from Frida live traffic) ───────────────────────────────
 SERVERS = {
-    # Primary servers from live capture
+    # From live Frida capture (non-standard ports — may be blocked by ISP/router)
     "login":            "https://login.popoh5.com:510",
     "pay":              "https://pay.popoh5.com:520",
 
-    # Servers from DEX static analysis
+    # Same hosts, standard ports (try if :510/:520 are blocked)
+    "login_443":        "https://login.popoh5.com",
+    "pay_443":          "https://pay.popoh5.com",
+    "login_80":         "http://login.popoh5.com",
+    "pay_80":           "http://pay.popoh5.com",
+
+    # IP direct (login.popoh5.com + pay.popoh5.com = 47.89.242.44)
+    "ip_510":           "https://47.89.242.44:510",
+    "ip_520":           "https://47.89.242.44:520",
+    "ip_443":           "https://47.89.242.44",
+    "ip_80":            "http://47.89.242.44",
+
+    # From DEX static analysis
     "account_primary":  "http://account.pockerday.net",
     "account_alt":      "https://aiwzfu.topgame.tw",
     "serverlist_1":     "http://103.14.33.146:89/api/serverlist",
-    "serverlist_2":     "https://aiwzfu.topgame.tw/api/serverlist",
     "sdk_happytomato":  "http://sdkapi.happytomato.com.tw",
     "sdk_t4game":       "http://qsdk.t4game.com",
-    "sdk_gigagames":    "http://tkd-qsdk.gigagames.co.th",
     "cdn_h5":           "https://dragonh5cdn.popoh5.com",
 }
 
@@ -105,6 +115,7 @@ class QuickGameSession:
             "Accept":       "application/json",
         })
         self._session.verify = False
+        self._session.max_redirects = 3
 
     def base_params(self, extra: dict = None, sign_key: str = None) -> dict:
         """Build signed param dict for a request."""
