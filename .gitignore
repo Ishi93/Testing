@@ -6,3 +6,4 @@ apk_extracted/
 *.iso
 *.qcow2
 *.img
+apk_patch_work/
