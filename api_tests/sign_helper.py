@@ -42,18 +42,28 @@ GOOGLE_API_KEY = "AIzaSyDRKQ9d6kfsoZT2lUnZcZnBYvH69HExNPE"
 #   Pay primary: https://pay.popoh5.com:520/               → IP 47.89.242.44
 #   Pay alt:     https://en.sjmobilegame.com:10420/
 #
-# NOTE: Hostname DNS times out from some networks (Spain confirmed).
-#       Use IP-direct with SNI adapter — port 510/520 confirmed open on 47.89.242.44
-SERVER_LOGIN      = "https://login.popoh5.com:510"
+# ── SERVER MIGRATION (confirmed 2026-06-09 via Frida live capture) ────────────
+# Old (2025): login.popoh5.com:510/loginbsnat → returns "没有开通" (deregistered)
+# New (2026): qsdk.t4game.com:80/v1/...       → returns result:true (ACTIVE)
+#   IP: 47.88.88.118:80 (plain HTTP, no TLS, no /loginbsnat prefix)
+#   autoLogin response: uid=28300872, same authToken still valid
+#
+# NOTE: Old servers kept for reference; default is now t4game.com
+SERVER_LOGIN      = "https://login.popoh5.com:510"     # DEAD — "没有开通"
 SERVER_LOGIN_ALT  = "https://en.sjmobilegame.com:10410"
-SERVER_LOGIN_IP   = "https://47.89.242.44:510"     # IP-direct, SNI=login.popoh5.com
+SERVER_LOGIN_IP   = "https://47.89.242.44:510"
 SERVER_PAY        = "https://pay.popoh5.com:520"
 SERVER_PAY_ALT    = "https://en.sjmobilegame.com:10420"
-SERVER_PAY_IP     = "https://47.89.242.44:520"     # IP-direct, SNI=pay.popoh5.com
-BASE_PATH         = "/loginbsnat"   # prefix for all SDK API endpoints
+SERVER_PAY_IP     = "https://47.89.242.44:520"
+# ── ACTIVE SERVERS (2026) ────────────────────────────────────────────────────
+SERVER_T4GAME     = "http://qsdk.t4game.com"           # ACTIVE — result:true
+SERVER_T4GAME_IP  = "http://47.88.88.118"              # IP-direct (same server)
+BASE_PATH         = ""   # t4game server: path is /v1/... directly (no /loginbsnat)
 
 SERVERS = {
-    "login":         SERVER_LOGIN,
+    "t4game":        SERVER_T4GAME,      # PRIMARY (active 2026)
+    "t4game_ip":     SERVER_T4GAME_IP,
+    "login":         SERVER_LOGIN,       # dead
     "login_alt":     SERVER_LOGIN_ALT,
     "login_ip":      SERVER_LOGIN_IP,
     "pay":           SERVER_PAY,
@@ -61,7 +71,6 @@ SERVERS = {
     "pay_ip":        SERVER_PAY_IP,
     "account_primary": "http://account.pockerday.net",
     "cdn_h5":        "https://dragonh5cdn.popoh5.com",
-    "sdk_happytomato": "http://sdkapi.happytomato.com.tw",
 }
 
 # SNI map: when connecting to IP directly, send correct SNI hostname for TLS
@@ -186,8 +195,8 @@ class QuickGameSession:
     authToken: str = LIVE_AUTH_TOKEN
     channel:   str = "default"
     lang:      str = "es"
-    server:    str = SERVER_LOGIN_IP   # IP-direct (47.89.242.44:510) — hostname DNS blocked
-    base_path: str = BASE_PATH
+    server:    str = SERVER_T4GAME     # ACTIVE: http://qsdk.t4game.com (confirmed 2026-06-09)
+    base_path: str = BASE_PATH         # "" — t4game uses /v1/... directly
     sign_key:  str = SIGN_KEY_SDK
 
     _session: requests.Session = field(default_factory=requests.Session, repr=False)
@@ -301,38 +310,27 @@ if __name__ == "__main__":
         print(f"    {k} = {str(v)[:60]}")
     print(f"    sign = {params['sign']}")
 
-    # ── Diagnóstico: verificar Host header real que se envía ─────────────────────
-    print(f"\n[*] Diagnosing Host header override...")
-    import requests as _req
-    test_req = _req.Request('GET', 'https://47.89.242.44:510/test',
-                            headers={"Host": "login.popoh5.com"})
-    prep = SESSION._session.prepare_request(test_req)
-    print(f"    Prepared Host header: {prep.headers.get('Host', '(NOT SET)')}")
-    print(f"    All headers: {dict(prep.headers)}")
-
-    print(f"\n[*] Testing endpoints — all servers including test server (118.24.68.91:83)...")
+    print(f"\n[*] Testing NEW server: qsdk.t4game.com (confirmed active 2026-06-09)...")
     TEST_COMBOS = [
-        ("IP-direct 47.89.242.44:510 + Host hdr",  SERVER_LOGIN_IP),
-        ("TEST SERVER 118.24.68.91:83 (plain HTTP)", "http://118.24.68.91:83"),
-        ("ALT en.sjmobilegame:10410",                SERVER_LOGIN_ALT),
-        ("PRIMARY login.popoh5.com",                 SERVER_LOGIN),
+        ("t4game.com (PRIMARY, plain HTTP)", SERVER_T4GAME),
+        ("t4game IP-direct 47.88.88.118",    SERVER_T4GAME_IP),
     ]
     for srv_name, srv in TEST_COMBOS:
         print(f"\n  → {srv_name}:")
-        for ep in ["/v1/system/init", "/v1/auth/getUserInfo", "/v1/user/registerVisitor"]:
+        for ep in ["/v1/system/init", "/v1/auth/getUserInfo",
+                   "/v1/user/autoLogin", "/v1/user/registerVisitor"]:
             try:
-                if ep == "/v1/system/init":
+                if ep in ("/v1/system/init", "/v1/user/autoLogin"):
                     r = SESSION.post(ep, server=srv, full_device=True)
                 else:
                     r = SESSION.get(ep, server=srv)
-                print(f"    [{r.status_code}] {ep} => {r.text[:150]}")
-                if r.status_code == 200 and '"code":0' in r.text:
-                    print(f"    *** SUCCESS! code=0 on {srv} ***")
-                    break
+                print(f"    [{r.status_code}] {ep} => {r.text[:200]}")
+                if '"result":true' in r.text or '"code":0' in r.text:
+                    print(f"    *** SUCCESS on {srv} ***")
             except Exception as e:
                 short = str(e)
                 if "timed out" in short or "ConnectTimeout" in short:
                     print(f"    [TIMEOUT] {ep}")
                     break
                 else:
-                    print(f"    [ERR] {ep}: {short[:80]}")
+                    print(f"    [ERR] {ep}: {short[:100]}")
