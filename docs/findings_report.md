@@ -99,8 +99,20 @@ sign = hashlib.md5(f"uid=X&username=Y&token=Z&os=android&usermode=0{APP_KEY}".en
 
 Then an attacker can call this endpoint directly with a crafted orderId to receive in-game currency without paying.
 
-**Test script:** `api_tests/02_payment_bypass.py → test_paysuccess_forgery()`  
-**Expected params (from DEX):** `orderId, payType, productId, amount, currencyType, purchaseToken`
+**Test script:** `api_tests/02_payment_bypass.py → test_paysuccess_forgery(), test_paysuccess_exact_params()`
+
+**Params confirmed from smali** (`com.qk.a.a.c.b$5.run()` — class mapped from obfuscation):
+```
+uid, username, orderAmount, cpOrderNo, goodsID, goodsName, currency,
+gameRoleId, gameRoleName, gameRoleLevel, gameRoleServerId, gameRoleServerName
++ sign params: token, sign, os, usermode, appKey
+```
+
+**Additional finding — SDKCallbackPay.onPaySuccess() is EMPTY:**
+The native `onPaySuccess` callback (called by the SDK after Google Play confirms payment)
+does nothing in this app. The game is notified via a server-to-server callback to
+`{paybackUrl}paycheckbsandroid`. This means the H5 game only learns of payment success
+through the server — a client-side JS injection cannot grant currency directly.
 
 ---
 
@@ -303,5 +315,6 @@ All endpoints return `x-deny-reason: host_not_allowed` because these game server
 | TalkingData AppID | `DOVC` | LOW |
 | TalkingData AppKey | `0838cc5b097f4fa830d1c3715727bfab` | LOW |
 | MD5 signing format | `uid=X&username=Y&token=Z&os=A&usermode=N{appKey}` | CRITICAL |
-| JS Bridge name | `window.android` | CRITICAL |
-| JS Payment method | `window.android.onPaySuccess(...)` | CRITICAL |
+| JS Bridge name | `window.jsbind` (NOT `window.android` — confirmed smali line 1414) | CRITICAL |
+| JS Bridge method | `window.jsbind.sendToNative(jsonString)` — ONLY @JavascriptInterface | CRITICAL |
+| JS Payment trigger | `sendToNative({orderId,subject,extInfo,money,roleId,...})` | CRITICAL |
