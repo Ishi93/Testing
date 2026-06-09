@@ -301,30 +301,38 @@ if __name__ == "__main__":
         print(f"    {k} = {str(v)[:60]}")
     print(f"    sign = {params['sign']}")
 
-    print(f"\n[*] Testing /v1/auth/getUserInfo — IP-direct first, then hostnames...")
-    for srv_name, srv in [
-        ("IP-direct 47.89.242.44:510", SERVER_LOGIN_IP),
-        ("ALT en.sjmobilegame:10410",  SERVER_LOGIN_ALT),
-        ("PRIMARY login.popoh5.com",   SERVER_LOGIN),
-    ]:
-        print(f"\n  → {srv_name}:")
-        try:
-            r = SESSION.get("/v1/auth/getUserInfo", server=srv)
-            print(f"    [{r.status_code}] {r.text[:300]}")
-        except Exception as e:
-            short = str(e)
-            if "timed out" in short or "ConnectTimeout" in short:
-                print(f"    [TIMEOUT] {srv}")
-            else:
-                print(f"    ERROR: {short[:120]}")
+    # ── Diagnóstico: verificar Host header real que se envía ─────────────────────
+    print(f"\n[*] Diagnosing Host header override...")
+    import requests as _req
+    test_req = _req.Request('GET', 'https://47.89.242.44:510/test',
+                            headers={"Host": "login.popoh5.com"})
+    prep = SESSION._session.prepare_request(test_req)
+    print(f"    Prepared Host header: {prep.headers.get('Host', '(NOT SET)')}")
+    print(f"    All headers: {dict(prep.headers)}")
 
-    print(f"\n[*] Testing full-device /v1/system/init on IP-direct...")
-    try:
-        r = SESSION.post("/v1/system/init", server=SERVER_LOGIN_IP, full_device=True)
-        print(f"    [{r.status_code}] {r.text[:300]}")
-    except Exception as e:
-        short = str(e)
-        if "timed out" in short or "ConnectTimeout" in short:
-            print(f"    [TIMEOUT]")
-        else:
-            print(f"    ERROR: {short[:120]}")
+    print(f"\n[*] Testing endpoints — all servers including test server (118.24.68.91:83)...")
+    TEST_COMBOS = [
+        ("IP-direct 47.89.242.44:510 + Host hdr",  SERVER_LOGIN_IP),
+        ("TEST SERVER 118.24.68.91:83 (plain HTTP)", "http://118.24.68.91:83"),
+        ("ALT en.sjmobilegame:10410",                SERVER_LOGIN_ALT),
+        ("PRIMARY login.popoh5.com",                 SERVER_LOGIN),
+    ]
+    for srv_name, srv in TEST_COMBOS:
+        print(f"\n  → {srv_name}:")
+        for ep in ["/v1/system/init", "/v1/auth/getUserInfo", "/v1/user/registerVisitor"]:
+            try:
+                if ep == "/v1/system/init":
+                    r = SESSION.post(ep, server=srv, full_device=True)
+                else:
+                    r = SESSION.get(ep, server=srv)
+                print(f"    [{r.status_code}] {ep} => {r.text[:150]}")
+                if r.status_code == 200 and '"code":0' in r.text:
+                    print(f"    *** SUCCESS! code=0 on {srv} ***")
+                    break
+            except Exception as e:
+                short = str(e)
+                if "timed out" in short or "ConnectTimeout" in short:
+                    print(f"    [TIMEOUT] {ep}")
+                    break
+                else:
+                    print(f"    [ERR] {ep}: {short[:80]}")
